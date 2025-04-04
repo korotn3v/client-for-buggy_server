@@ -1,6 +1,7 @@
 use std::env;
 use std::error::Error;
-use reqwest::blocking::Client;
+use std::io::{Write, BufRead, BufReader, Read};
+use std::net::TcpStream;
 use sha2::{Sha256, Digest};
 
 fn to_hex_string(bytes: &[u8]) -> String {
@@ -17,13 +18,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("Usage: {} <number_of_bytes> <expected_sha256_hash>", args[0]);
         std::process::exit(1);
     }
-
     let total_bytes: usize = args[1].parse()?;
     let expected_hash = args[2].to_lowercase();
 
-    let client = Client::new();
-    let url = "http://127.0.0.1:8080/";
-
+    let host = "127.0.0.1";
+    let port = 8080;
     let mut current_offset = 0;
     let chunk_size = 64 * 1024; // 64 KB
     let mut data: Vec<u8> = Vec::new();
@@ -31,29 +30,69 @@ fn main() -> Result<(), Box<dyn Error>> {
     while current_offset < total_bytes {
         let remaining = total_bytes - current_offset;
         let request_size = remaining.min(chunk_size);
-        // if we ask 0-65536, python will give us 0-65535
         let range_header = format!("bytes={}-{}", current_offset, current_offset + request_size);
-
         println!("Ask for range: {}", range_header);
 
-        let response = client.get(url)
-            .header("Range", &range_header)
-            .send()?;
+        let addr = format!("{}:{}", host, port);
+        let mut stream = TcpStream::connect(addr)?;
 
-        if !response.status().is_success() && response.status().as_u16() != 206 {
-            eprintln!("Error: status code {}", response.status());
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: {}:{}\r\nRange: {}\r\nConnection: close\r\n\r\n",
+            host, port, range_header
+        );
+        stream.write_all(request.as_bytes())?;
+
+        let mut reader = BufReader::new(stream);
+
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line)?;
+        let status_parts: Vec<&str> = status_line.split_whitespace().collect();
+        if status_parts.len() < 2 {
+            eprintln!("Invalid HTTP response: {}", status_line);
+            std::process::exit(1);
+        }
+        let status_code: u16 = status_parts[1].parse()?;
+        if !(status_code == 200 || status_code == 206) {
+            eprintln!("Error: status code {}", status_code);
             std::process::exit(1);
         }
 
-        let chunk = response.bytes()?;
-        let received = chunk.len();
+        let mut content_length: Option<usize> = None;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line)?;
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            if line.to_lowercase().starts_with("content-length:") {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 2 {
+                    let len_str = parts[1].trim();
+                    content_length = Some(len_str.parse()?);
+                }
+            }
+        }
+        let content_length = match content_length {
+            Some(len) => len,
+            None => {
+                eprintln!("No Content-Length header found.");
+                std::process::exit(1);
+            }
+        };
 
+        let mut chunk = vec![0u8; content_length];
+        let mut read_total = 0;
+        while read_total < content_length {
+            let read_bytes = reader.read(&mut chunk[read_total..])?;
+            if read_bytes == 0 { break; }
+            read_total += read_bytes;
+        }
+        let received = read_total;
         if received == 0 {
             eprintln!("Get 0 bytes, end the download.");
             break;
         }
-
-        data.extend_from_slice(&chunk);
+        data.extend_from_slice(&chunk[..received]);
         current_offset += received;
         println!("Get {} bytes, summary {}/{} bytes", received, current_offset, total_bytes);
     }

@@ -36,12 +36,11 @@ fun main(args: Array<String>) {
     val host = "127.0.0.1"
     val port = 8080
     var currentOffset = 0
-    val chunkSize = 64 * 1024 // 64 KB
     val dataBuffer = ByteArrayOutputStream()
 
     while (currentOffset < totalBytes) {
         val remaining = totalBytes - currentOffset
-        val requestSize = if (remaining < chunkSize) remaining else chunkSize
+        val requestSize = remaining
         val rangeHeader = "bytes=$currentOffset-${currentOffset + requestSize}"
         println("Ask for range: $rangeHeader")
 
